@@ -11,7 +11,7 @@ pub struct Success {
 }
 
 pub struct ErrorDescription {
-    code: i8,
+    code: u64,
     message: String
 }
 

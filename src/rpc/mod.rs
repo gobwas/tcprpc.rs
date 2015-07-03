@@ -1,14 +1,12 @@
-extern crate uuid;
-
 mod request;
 mod response;
 
 use ::std::io::prelude::*;
-use ::std::io::Error;
+use ::std::io;
 use ::std::result::Result;
 use ::std::net::{Ipv4Addr, SocketAddrV4, TcpStream};
 use ::rustc_serialize::json;
-use ::rustc_serialize::json::{Json};
+use ::rustc_serialize::json::{Json, Object};
 use ::uuid::Uuid;
 
 pub use self::request::{Request};
@@ -17,10 +15,11 @@ pub use self::response::Error as ResponseError;
 
 pub const DELIMITER: &'static str = "----";
 
-
-pub enum ClientError(
-    ParseError(json::ParserError)
-);
+pub enum ClientError {
+    ParseError(json::ParserError),
+    IoError(io::Error),
+    Unknown
+}
 
 pub type RequestResult<T> = Result<T, ClientError>;
 
@@ -48,7 +47,7 @@ impl Client {
             }
             Err(e) => {
                 println!("Could not connect to host {}:{}", self.host, self.port);
-                return Err(e);
+                return Err(ClientError::IoError(e));
             }
         };
 
@@ -81,47 +80,85 @@ impl Client {
                             buffer.push(parts.remove(0).to_string());
 
                             // compose buffer and parse it
-                            let obj = match Json::from_str(&buffer.connect("")) {
+                            let obj: Object = match Json::from_str(&buffer.connect("")) {
                                 Ok(obj) => {
-                                    println!("parsed response: {:?}", obj);
-                                    obj
+                                    match (obj) {
+                                        Json::Object(obj) => {
+                                            println!("parsed response: {:?}", obj);
+                                            obj
+                                        }
+                                        _ => {
+                                            println!("not obj {:?}", obj);
+                                            return Err(ClientError::Unknown);
+                                        }
+                                    }
                                 }
                                 Err(e) => {
                                     println!("could not parse json: {}", e);
-                                    return Err(e);
+                                    return Err(ClientError::ParseError(e));
                                 }
                             };
 
-                            match (obj) {
-                                Json { error: Json::Object } => {
-                                    return Ok(Response::Error(ResponseError{
-                                        id: obj.id,
-                                        error: ErrorDescription {
-                                            code: obj.error.code,
-                                            message: obj.error.message
+
+                            let id = obj.get("id").unwrap().to_string();
+
+                            let resp = match obj.get("error") {
+                                Some(err_def) => {
+                                    let def: (u64, String) = match err_def {
+                                        &Json::Object(obj) => {
+                                            match ( obj.get("code"), obj.get("message") ) {
+                                                ( Some(&Json::U64(c)), Some(&Json::String(m)) ) => {
+                                                    (c, m)
+                                                }
+                                                _ => {
+                                                    return Err(ClientError::Unknown)
+                                                }
+                                            }
                                         }
-                                    }));
+                                        _ => {
+                                            return Err(ClientError::Unknown);
+                                        }
+                                    };
+
+                                    Response::Error(ResponseError{
+                                        id: id,
+                                        error: ErrorDescription {
+                                            code: def.0,
+                                            message: def.1
+                                        }
+                                    })
                                 }
                                 _ => {
-                                    return Ok(Response::Success(Success{
-                                        id: obj.id,
-                                        result: obj.result
-                                    }));
+                                    let def: (String, Json) = match ( obj.get("id"), obj.get("result") ) {
+                                        ( Some(&Json::String(id)), Some(&result) ) => {
+                                            ( id, result )
+                                        }
+                                        _ => {
+                                            return Err(ClientError::Unknown);
+                                        }
+                                    };
+
+                                    Response::Success(Success{
+                                        id: def.0,
+                                        result: def.1
+                                    })
                                 }
                             };
+
+                            return Ok(resp);
 
                             break 'reading;
                         },
                         Err(e) => {
                             println!("Invalid UTF-8 sequence: {}", e);
-                            return Err(e);
+                            return Err(ClientError::Unknown);
                         }
                     }
 
                 },
                 Err(e) => {
                     println!("Read error :-(");
-                    return Err(e);
+                    return Err(ClientError::Unknown);
                 }
             };
         }
