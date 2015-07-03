@@ -1,0 +1,8 @@
+[package]
+name = "rustt"
+version = "0.1.0"
+authors = ["gobwas <gobwas@gmail.com>"]
+
+[dependencies]
+rustc-serialize = "0.3"
+uuid = "*"
