@@ -40,7 +40,7 @@ impl Client {
     // Creates request
     fn request(&self, topic: String, params: Vec<Json>) -> Result<Response, ClientError> {
 
-        let stream = match TcpStream::connect(SocketAddrV4::new( Ipv4Addr::new(127, 0, 0, 1), 3000u16 )) {
+        let mut stream = match TcpStream::connect(SocketAddrV4::new( Ipv4Addr::new(127, 0, 0, 1), 3000u16 )) {
             Ok(stream) => {
                 println!("Connected to the host {}:{}", self.host, self.port);
                 stream
@@ -53,8 +53,8 @@ impl Client {
 
         let request = Request::new( Uuid::new_v4().to_string(), topic, params );
 
-        stream.write(json::encode(&request).unwrap().as_bytes());
-        stream.write(DELIMITER.as_bytes());
+        let _ = stream.write(json::encode(&request).unwrap().as_bytes());
+        let _ = stream.write(DELIMITER.as_bytes());
 
         // buffer to store chunks from the server
         let mut buffer: Vec<String> = Vec::new();
@@ -82,7 +82,7 @@ impl Client {
                             // compose buffer and parse it
                             let obj: Object = match Json::from_str(&buffer.connect("")) {
                                 Ok(obj) => {
-                                    match (obj) {
+                                    match obj {
                                         Json::Object(obj) => {
                                             println!("parsed response: {:?}", obj);
                                             obj
@@ -105,10 +105,10 @@ impl Client {
                             let resp = match obj.get("error") {
                                 Some(err_def) => {
                                     let def: (u64, String) = match err_def {
-                                        &Json::Object(obj) => {
+                                        &Json::Object(ref obj) => {
                                             match ( obj.get("code"), obj.get("message") ) {
-                                                ( Some(&Json::U64(c)), Some(&Json::String(m)) ) => {
-                                                    (c, m)
+                                                ( Some(&Json::U64(c)), Some(&Json::String(ref m)) ) => {
+                                                    (c, m.clone())
                                                 }
                                                 _ => {
                                                     return Err(ClientError::Unknown)
@@ -130,8 +130,8 @@ impl Client {
                                 }
                                 _ => {
                                     let def: (String, Json) = match ( obj.get("id"), obj.get("result") ) {
-                                        ( Some(&Json::String(id)), Some(&result) ) => {
-                                            ( id, result )
+                                        ( Some(&Json::String(ref id)), Some(result) ) => {
+                                            ( id.clone(), result.clone() )
                                         }
                                         _ => {
                                             return Err(ClientError::Unknown);
@@ -161,6 +161,6 @@ impl Client {
                     return Err(ClientError::Unknown);
                 }
             };
-        }
+        };
     }
 }

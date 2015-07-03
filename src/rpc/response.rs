@@ -6,16 +6,16 @@ pub enum Response {
 }
 
 pub struct Success {
-    id: String,
-    result: Json
+    pub id: String,
+    pub result: Json
 }
 
 pub struct ErrorDescription {
-    code: u64,
-    message: String
+    pub code: u64,
+    pub message: String
 }
 
 pub struct Error {
-    id: String,
-    error: ErrorDescription
+    pub id: String,
+    pub error: ErrorDescription
 }
