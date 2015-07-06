@@ -18,7 +18,8 @@ pub const DELIMITER: &'static str = "----";
 pub enum ClientError {
     ParseError(json::ParserError),
     IoError(io::Error),
-    Unknown
+    IdMismatchError,
+    UnknownError
 }
 
 pub type RequestResult<T> = Result<T, ClientError>;
@@ -40,7 +41,7 @@ impl Client {
     // Creates request
     fn request(&self, topic: String, params: Vec<Json>) -> Result<Response, ClientError> {
 
-        let mut stream = match TcpStream::connect(SocketAddrV4::new( Ipv4Addr::new(127, 0, 0, 1), 3000u16 )) {
+        let mut stream = match TcpStream::connect(SocketAddrV4::new( self.host, self.port )) {
             Ok(stream) => {
                 println!("Connected to the host {}:{}", self.host, self.port);
                 stream
@@ -51,7 +52,8 @@ impl Client {
             }
         };
 
-        let request = Request::new( Uuid::new_v4().to_string(), topic, params );
+        let request_id = Uuid::new_v4().to_string();
+        let request = Request::new( request_id.clone(), topic, params );
 
         let _ = stream.write(json::encode(&request).unwrap().as_bytes());
         let _ = stream.write(DELIMITER.as_bytes());
@@ -64,101 +66,101 @@ impl Client {
 
             match stream.read(&mut buf) {
                 Ok(bytes_read) => {
-                    match String::from_utf8(buf[..bytes_read].to_vec()) {
+                    let hunk = match String::from_utf8(buf[..bytes_read].to_vec()) {
                         Ok(value) => {
-                            let mut parts: Vec<&str> = value.split(DELIMITER).collect();;
+                            value
+                        }
+                        Err(e) => {
+                            println!("Invalid UTF-8 sequence: {}", e);
+                            return Err(ClientError::UnknownError);
+                        }
+                    };
 
-                            // if there is no delimeter in chunk
-                            // then we need to store this chunk
-                            // and wait for delimeter in upcoming chunks
-                            if parts.len() == 1 {
-                                buffer.push(value.clone());
-                                continue 'reading;
+                    let mut parts: Vec<&str> = hunk.split(DELIMITER).collect();
+
+                    // if there is no delimeter in chunk
+                    // then we need to store this chunk
+                    // and wait for delimeter in upcoming chunks
+                    if parts.len() == 1 {
+                        buffer.push(hunk.clone());
+                        continue 'reading;
+                    }
+
+                    // push the last part before delimeter into the buffer
+                    buffer.push(parts.remove(0).to_string());
+
+                    // join buffer and then parse
+                    let obj: Object = match Json::from_str(&buffer.connect("")) {
+                        Ok(obj) => {
+                            match obj {
+                                Json::Object(obj) => {
+                                    println!("parsed response: {:?}", obj);
+                                    obj
+                                }
+                                _ => {
+                                    println!("not obj {:?}", obj);
+                                    return Err(ClientError::UnknownError);
+                                }
                             }
+                        }
+                        Err(e) => {
+                            println!("could not parse json: {}", e);
+                            return Err(ClientError::ParseError(e));
+                        }
+                    };
 
-                            // push the last part before delimeter into the buffer
-                            buffer.push(parts.remove(0).to_string());
-
-                            // compose buffer and parse it
-                            let obj: Object = match Json::from_str(&buffer.connect("")) {
-                                Ok(obj) => {
-                                    match obj {
-                                        Json::Object(obj) => {
-                                            println!("parsed response: {:?}", obj);
-                                            obj
+                    let resp = match obj.get("error") {
+                        Some(err_def) => {
+                            let def: ( String, u64, String ) = match err_def {
+                                &Json::Object(ref obj) => {
+                                    match ( obj.get("id"), obj.get("code"), obj.get("message") ) {
+                                        ( Some(&Json::String(ref id)), Some(&Json::U64(code)), Some(&Json::String(ref message)) ) => {
+                                            (id.clone(), code, message.clone())
                                         }
                                         _ => {
-                                            println!("not obj {:?}", obj);
-                                            return Err(ClientError::Unknown);
+                                            return Err(ClientError::UnknownError)
                                         }
                                     }
                                 }
-                                Err(e) => {
-                                    println!("could not parse json: {}", e);
-                                    return Err(ClientError::ParseError(e));
+                                _ => {
+                                    return Err(ClientError::UnknownError);
                                 }
                             };
 
-
-                            let id = obj.get("id").unwrap().to_string();
-
-                            let resp = match obj.get("error") {
-                                Some(err_def) => {
-                                    let def: (u64, String) = match err_def {
-                                        &Json::Object(ref obj) => {
-                                            match ( obj.get("code"), obj.get("message") ) {
-                                                ( Some(&Json::U64(c)), Some(&Json::String(ref m)) ) => {
-                                                    (c, m.clone())
-                                                }
-                                                _ => {
-                                                    return Err(ClientError::Unknown)
-                                                }
-                                            }
-                                        }
-                                        _ => {
-                                            return Err(ClientError::Unknown);
-                                        }
-                                    };
-
-                                    Response::Error(ResponseError{
-                                        id: id,
-                                        error: ErrorDescription {
-                                            code: def.0,
-                                            message: def.1
-                                        }
-                                    })
+                            Response::Error(ResponseError{
+                                id: def.0,
+                                error: ErrorDescription {
+                                    code: def.1,
+                                    message: def.2
+                                }
+                            })
+                        }
+                        _ => {
+                            let def: (String, Json) = match ( obj.get("id"), obj.get("result") ) {
+                                ( Some(&Json::String(ref id)), Some(result) ) => {
+                                    ( id.clone(), result.clone() )
                                 }
                                 _ => {
-                                    let def: (String, Json) = match ( obj.get("id"), obj.get("result") ) {
-                                        ( Some(&Json::String(ref id)), Some(result) ) => {
-                                            ( id.clone(), result.clone() )
-                                        }
-                                        _ => {
-                                            return Err(ClientError::Unknown);
-                                        }
-                                    };
-
-                                    Response::Success(Success{
-                                        id: def.0,
-                                        result: def.1
-                                    })
+                                    return Err(ClientError::UnknownError);
                                 }
                             };
 
-                            return Ok(resp);
-
-                            break 'reading;
-                        },
-                        Err(e) => {
-                            println!("Invalid UTF-8 sequence: {}", e);
-                            return Err(ClientError::Unknown);
+                            Response::Success(Success{
+                                id: def.0,
+                                result: def.1
+                            })
                         }
+                    };
+
+                    if resp.get_id() != request_id {
+                        return Err(ClientError::IdMismatchError);
                     }
 
+                    return Ok(resp);
                 },
                 Err(e) => {
                     println!("Read error :-(");
-                    return Err(ClientError::Unknown);
+                    return Err(ClientError::IoError(e));
                 }
             };
         };

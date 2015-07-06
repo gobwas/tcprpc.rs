@@ -5,6 +5,19 @@ pub enum Response {
     Error(Error)
 }
 
+impl Response {
+    pub fn get_id(&self) -> String {
+        match *self {
+            Response::Success(ref success) => {
+                success.id.clone()
+            }
+            Response::Error(ref error) => {
+                error.id.clone()
+            }
+        }
+    }
+}
+
 pub struct Success {
     pub id: String,
     pub result: Json

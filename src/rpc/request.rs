@@ -1,5 +1,4 @@
-use ::rustc_serialize::json;
-use ::rustc_serialize::json::{Json, Object};
+use ::rustc_serialize::json::{Json};
 
 #[derive(RustcEncodable)]
 pub struct Request {
