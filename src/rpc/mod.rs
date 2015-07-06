@@ -4,7 +4,7 @@ mod response;
 use ::std::io::prelude::*;
 use ::std::io;
 use ::std::result::Result;
-use ::std::net::{Ipv4Addr, SocketAddrV4, TcpStream};
+use ::std::net::{SocketAddr, TcpStream};
 use ::rustc_serialize::json;
 use ::rustc_serialize::json::{Json, Object};
 use ::uuid::Uuid;
@@ -25,29 +25,27 @@ pub enum ClientError {
 pub type RequestResult<T> = Result<T, ClientError>;
 
 pub struct Client {
-    host: Ipv4Addr,
-    port: u16
+    addr: SocketAddr
 }
 
 impl Client {
     // Constructor
-    fn new(host: Ipv4Addr, port: u16) -> Client {
+    fn new(addr: SocketAddr) -> Client {
         Client {
-            host: host,
-            port: port
+            addr: addr
         }
     }
 
     // Creates request
     fn request(&self, topic: String, params: Vec<Json>) -> Result<Response, ClientError> {
 
-        let mut stream = match TcpStream::connect(SocketAddrV4::new( self.host, self.port )) {
+        let mut stream = match TcpStream::connect(self.addr) {
             Ok(stream) => {
-                println!("Connected to the host {}:{}", self.host, self.port);
+                println!("Connected to the host {}", self.addr);
                 stream
             }
             Err(e) => {
-                println!("Could not connect to host {}:{}", self.host, self.port);
+                println!("Could not connect to host {}", self.addr);
                 return Err(ClientError::IoError(e));
             }
         };
