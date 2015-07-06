@@ -1,6 +1,7 @@
 use ::rustc_serialize::json::{Json};
 
 #[derive(RustcEncodable)]
+#[derive(Debug)]
 pub struct Request {
     pub id: String,
     pub topic: String,
