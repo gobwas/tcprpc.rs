@@ -30,14 +30,14 @@ pub struct Client {
 
 impl Client {
     // Constructor
-    fn new(addr: SocketAddr) -> Client {
+    pub fn new(addr: SocketAddr) -> Client {
         Client {
             addr: addr
         }
     }
 
     // Creates request
-    fn request(&self, topic: String, params: Vec<Json>) -> Result<Response, ClientError> {
+    pub fn request(&self, topic: String, params: Vec<Json>) -> Result<Response, ClientError> {
 
         let mut stream = match TcpStream::connect(self.addr) {
             Ok(stream) => {
