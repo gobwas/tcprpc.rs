@@ -10,14 +10,17 @@ use ::rustc_serialize::json::{Json, Object};
 use ::uuid::Uuid;
 use ::std::thread;
 use ::std::thread::{JoinHandle};
-use ::std::sync::{Arc, Mutex};
+use ::std::sync::{Arc, Mutex, RwLock};
 use ::std::collections::{HashMap};
+use ::std::sync::mpsc::channel;
+use ::std::sync::mpsc::{Sender, Receiver};
+use ::std::io::BufReader;
 
 pub use self::request::{Request};
 pub use self::response::{Response, Success, Error, ErrorDescription};
 pub use self::response::Error as ResponseError;
 
-pub const DELIMITER: &'static str = "\n";
+pub const DELIMITER: u8 = b'\n';
 pub const SLEEP: u32 = 0;
 
 #[derive(Debug)]
@@ -32,21 +35,29 @@ pub type RequestResult = Result<Response, ClientError>;
 
 pub struct Client {
     addr: SocketAddr,
-    request_pool: Arc<Mutex<Vec<Request>>>,
-    response_pool: Arc<Mutex<HashMap<String, Response>>>,
-    ready: bool
+    response_pool: Arc<Mutex<HashMap<String, Sender<Response>>>>,
+    ready: bool,
+    stream: Arc<RwLock<TcpStream>>
 }
 
 impl Client {
     // Constructor
     pub fn new(addr: SocketAddr) -> Client {
-        // let request: Vec<Request> = Vec::new();
-        // let response: HashMap<String, Response> = HashMap::new();
+        let stream = match TcpStream::connect(addr) {
+            Ok(stream) => {
+                debug!("Connected to the host {}", addr);
+                stream
+            }
+            Err(e) => {
+                panic!("Could not connect to host {}", addr);
+            }
+        };
+
         Client {
             addr: addr,
-            request_pool: Arc::new(Mutex::new(Vec::new())),
             response_pool: Arc::new(Mutex::new(HashMap::new())),
-            ready: false
+            ready: false,
+            stream: Arc::new(RwLock::new(stream))
         }
     }
 
@@ -55,189 +66,107 @@ impl Client {
             panic!("Already initialized");
         }
 
-        let request = self.request_pool.clone();
-        let response = self.response_pool.clone();
-
-        let mut stream = match TcpStream::connect(self.addr) {
-            Ok(stream) => {
-                debug!("Connected to the host {}", self.addr);
-                stream
-            }
-            Err(e) => {
-                panic!("Could not connect to host {}", self.addr);
-            }
-        };
-
-        let (mut streamInput, mut streamOutput) = match (stream.try_clone(), stream.try_clone()) {
-            (Ok(input), Ok(output)) => {
-                (input, output)
-            }
-            _ => {
-                panic!("Could not prepare the stream");
-            }
-        };
+        let mut stream = self.stream.clone();
+        let mut request = self.response_pool.clone();
 
         thread::spawn(move || {
-            let mut tick = || {
-                let mut pool = request.lock().unwrap();
-
-                match pool.pop() {
-                    Some(request) => {
-                        let _ = streamInput.write(json::encode(&request).unwrap().as_bytes());
-                        let _ = streamInput.write(DELIMITER.as_bytes());
-                        info!("Sent requested to the host {:?}", request);
-                    }
-                    _ => {
-                        // info!("No more requests to send");
-                    }
+            let mut stream = match stream.read() {
+                Ok(s) => {
+                    s.try_clone().unwrap()
+                }
+                _ => {
+                    panic!("Could not lock stream");
                 }
             };
 
+            let mut reader = BufReader::new(stream);
+
             loop {
-                // debug!("Writing tick");
-                // thread::sleep_ms(SLEEP);
-                tick();
-            }
-        });
+                let mut buffer: Vec<u8> = Vec::new();
 
-        thread::spawn(move || {
-            // buffer to store chunks from the server
-            let mut buffer: Vec<String> = Vec::new();
+                match reader.read_until(DELIMITER, &mut buffer) {
+                    Ok(bytes_read) => {
+                        if bytes_read == 0 {
+                            panic!("Socket hunged up");
+                        }
 
-            let mut tick = || {
-                'reading: loop {
-                    let mut buf = [0u8; 32];
-
-                    match streamOutput.read(&mut buf) {
-                        Ok(bytes_read) => {
-
-                            if bytes_read == 0 {
-                                panic!("Socket hanged up");
-                            }
-
-                            debug!("Read {} bytes", bytes_read);
-
-                            let mut hash = response.lock().unwrap();
-
-                            let hunk = match String::from_utf8(buf[..bytes_read].to_vec()) {
-                                Ok(value) => {
-                                    debug!("Received hunk {}", value);
-                                    value
-                                }
-                                Err(e) => {
-                                    error!("Invalid UTF-8 sequence: {}", e);
-                                    buffer.clear();
-                                    break 'reading;
-                                    // return Err(ClientError::UnknownError);
-                                }
-                            };
-
-                            let mut parts: Vec<&str> = hunk.split(DELIMITER).collect();
-
-                            // if there is no delimeter in chunk
-                            // then we need to store this chunk
-                            // and wait for delimeter in upcoming chunks
-                            if parts.len() == 1 {
-                                buffer.push(hunk.clone());
-                                continue 'reading;
-                            }
-
-                            'parsing: while parts.len() > 0 {
-                                // push the last part before delimeter into the buffer
-                                buffer.push(parts.remove(0).to_string());
-
-                                // if there is no more delimeted chunks
-                                // then the added above is non closed part of message
-                                // so we need to wait for delimeter in upcoming chunks
-                                if parts.len() == 0 {
-                                    continue 'reading;
-                                }
-
-                                // join buffered parts
-                                let collected = &buffer.connect("");
-
-                                // clear it for upcoming parts
-                                buffer.clear();
-
-                                // join buffer and then parse
-                                let obj: Object = match Json::from_str(collected) {
-                                    Ok(obj) => {
-                                        match obj {
-                                            Json::Object(obj) => {
-                                                debug!("Parsed response: {:?}", obj);
-                                                obj
-                                            }
-                                            _ => {
-                                                error!("Not an obj {:?}", obj);
-                                                // return Err(ClientError::UnknownError);
-                                                break 'parsing;
-                                            }
-                                        }
-                                    }
-                                    Err(e) => {
-                                        error!("Could not parse json: {}", e);
-                                        // return Err(ClientError::ParseError(e));
-                                        continue 'parsing;
-                                    }
-                                };
-
-                                let resp = match obj.get("error") {
-                                    Some(&Json::Object(ref err_def)) => {
-                                        let ( id, code, message ) = match ( obj.get("id"), err_def.get("code"), err_def.get("message") ) {
-                                            ( Some(&Json::String(ref id)), Some(&Json::I64(code)), Some(&Json::String(ref message)) ) => {
-                                                (id.clone(), code, message.clone())
-                                            }
-                                            _ => {
-                                                error!("Unknown error response format: {:?}", obj);
-                                                continue 'parsing;
-                                                // return Err(ClientError::UnknownError)
-                                            }
-                                        };
-
-                                        Response::Error(ResponseError{
-                                            id: id,
-                                            error: ErrorDescription {
-                                                code: code,
-                                                message: message
-                                            }
-                                        })
+                        let obj = match Json::from_str(&*String::from_utf8(buffer).unwrap()) {
+                            Ok(obj) => {
+                                match obj {
+                                    Json::Object(obj) => {
+                                        debug!("Parsed response: {:?}", obj);
+                                        obj
                                     }
                                     _ => {
-                                        let (id, result) = match ( obj.get("id"), obj.get("result") ) {
-                                            ( Some(&Json::String(ref id)), Some(result) ) => {
-                                                ( id.clone(), result.clone() )
-                                            }
-                                            _ => {
-                                                error!("Unknown response format: {:?}", obj);
-                                                continue 'parsing;
-                                                // return Err(ClientError::UnknownError);
-                                            }
-                                        };
+                                        error!("Not an obj {:?}", obj);
+                                        continue;
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                error!("Could not parse json: {}", e);
+                                continue;
+                            }
+                        };
 
-                                        Response::Success(Success{
-                                            id: id,
-                                            result: result
-                                        })
+                        let resp = match obj.get("error") {
+                            Some(&Json::Object(ref err_def)) => {
+                                let ( id, code, message ) = match ( obj.get("id"), err_def.get("code"), err_def.get("message") ) {
+                                    ( Some(&Json::String(ref id)), Some(&Json::I64(code)), Some(&Json::String(ref message)) ) => {
+                                        (id.clone(), code, message.clone())
+                                    }
+                                    _ => {
+                                        error!("Unknown error response format: {:?}", obj);
+                                        continue;
                                     }
                                 };
 
-                                info!("Got response {:?}", resp);
-                                hash.insert(resp.get_id(), resp);
-                            };
-                        },
-                        Err(e) => {
-                            error!("Read error :-(");
-                            continue 'reading;
-                            // return Err(ClientError::IoError(e));
-                        }
-                    };
-                };
-            };
+                                Response::Error(ResponseError{
+                                    id: id,
+                                    error: ErrorDescription {
+                                        code: code,
+                                        message: message
+                                    }
+                                })
+                            }
+                            _ => {
+                                let (id, result) = match ( obj.get("id"), obj.get("result") ) {
+                                    ( Some(&Json::String(ref id)), Some(result) ) => {
+                                        ( id.clone(), result.clone() )
+                                    }
+                                    _ => {
+                                        error!("Unknown response format: {:?}", obj);
+                                        continue;
+                                    }
+                                };
 
-            loop {
-                // debug!("Reading tick");
-                // thread::sleep_ms(3000);
-                tick();
+                                Response::Success(Success{
+                                    id: id,
+                                    result: result
+                                })
+                            }
+                        };
+
+                        info!("Got response {:?}", resp);
+                        {
+                            info!("Locking request...");
+                            match request.lock().unwrap().remove(&resp.get_id()) {
+                                Some(tx) => {
+                                    tx.send(resp);
+                                }
+                                _ => {
+                                    error!("No such channel");
+                                    continue;
+                                }
+                            }
+                        }
+
+                        info!("Unlocking request...");
+                    }
+                    Err(e) => {
+                        error!("Read error :-(");
+                    }
+                }
             };
         });
 
@@ -246,74 +175,48 @@ impl Client {
 
     // Creates request
     pub fn request(&self, topic: &str, params: Vec<Json>) -> RequestResult {
+        info!("Should request {:?}", topic);
+
         if self.ready == false {
             panic!("Could not send request to the closed client");
         }
 
-        let request = self.request_pool.clone();
-        let response = self.response_pool.clone();
-
         let topic = topic.to_string();
+        let request_id = Uuid::new_v4().to_string();
 
-        let pending = thread::spawn(move || {
-            let request_id = Uuid::new_v4().to_string();
+        let (tx, rx) = channel();
 
-            let mut write = || {
-                let mut pool = match request.lock() {
-                    Ok(p) => {
-                        // debug!("Locked requests queue");
-                        p
+        let mut pool = self.response_pool.clone();
+        let mut stream = self.stream.clone();
+
+        {
+            pool.lock().unwrap().insert(request_id.clone(), tx);
+            info!("Inserted in the response hash {:?}", request_id);
+
+            info!("Locking pool...");
+            {
+                match stream.write() {
+                    Ok(s) => {
+                        let mut stream = s.try_clone().unwrap();
+                        let req = Request::new(request_id.clone(), topic, params);
+
+                        let _ = stream.write(json::encode(&req).unwrap().as_bytes());
+                        let _ = stream.write(&[DELIMITER]);
+                        info!("Sent requested to the host {:?}", req);
                     }
                     _ => {
-                        panic!("Could not lock requests queue");
+                        panic!("Could not lock stream");
                     }
                 };
-
-                pool.push( Request::new(request_id.clone(), topic, params) );
-
-                debug!("Pushed request to the queue ({})", pool.len());
-            };
-
-            let mut read = || {
-                let mut pool = match response.lock() {
-                    Ok(p) => {
-                        // debug!("Locked responses queue");
-                        p
-                    }
-                    _ => {
-                        panic!("Could not lock responses queue");
-                    }
-                };
-
-                pool.remove(&request_id)
-            };
-
-            write();
-
-            'waiting: loop {
-                // let resp: Option<Response> = hash.remove(&request_id);
-                // debug!("Pending tick");
-                // thread::sleep_ms(SLEEP);
-
-                match read() {
-                    Some(response) => {
-                        return response;
-                    }
-                    _ => {
-                        continue 'waiting;
-                    }
-                }
             }
-        });
+            info!("Unlocking pool...");
+        }
 
-        debug!("Waiting for the thread result..");
-
-        match pending.join() {
+        match rx.recv() {
             Ok(result) => {
                 Ok(result)
             }
-            _ => {
-                debug!("Opps");
+            Err(e) => {
                 Err(ClientError::UnknownError)
             }
         }
