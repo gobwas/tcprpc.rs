@@ -17,7 +17,7 @@ pub use self::request::{Request};
 pub use self::response::{Response, Success, Error, ErrorDescription};
 pub use self::response::Error as ResponseError;
 
-pub const DELIMITER: &'static str = "----";
+pub const DELIMITER: &'static str = "\n";
 pub const SLEEP: u32 = 0;
 
 #[derive(Debug)]
@@ -106,7 +106,7 @@ impl Client {
 
             let mut tick = || {
                 'reading: loop {
-                    let mut buf = [0u8; 256];
+                    let mut buf = [0u8; 32];
 
                     match streamOutput.read(&mut buf) {
                         Ok(bytes_read) => {
